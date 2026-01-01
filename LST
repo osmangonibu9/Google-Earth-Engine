@@ -1,0 +1,188 @@
+// 1. Landsat 8 L2 Image (2025)
+// ======================================
+var image = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(ROI)
+  .filter(ee.Filter.lt('CLOUD_COVER', 1))
+  .filterDate('2025-01-01', '2025-10-30')
+  .median()
+  .clip(ROI);
+
+Map.centerObject(ROI, 10);
+Map.addLayer(image, {}, 'Landsat Image');
+
+
+// 2. NDVI
+var NDVI = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+Map.addLayer(NDVI, {min: -1, max: 1, palette: ['blue','white','green']}, 'NDVI');
+
+
+// 3. NDVI max & min
+var stats = NDVI.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: ROI,
+  scale: 30,
+  bestEffort: true
+});
+
+var NDVImin = ee.Number(stats.get('NDVI_min'));
+var NDVImax = ee.Number(stats.get('NDVI_max'));
+print('NDVI min:', NDVImin);
+print('NDVI max:', NDVImax);
+
+
+// 4. Proportion of Vegetation (Pv)
+// ======================================
+var Pv = NDVI.subtract(NDVImin)
+  .divide(NDVImax.subtract(NDVImin))
+  .pow(2)
+  .rename('Pv');
+Map.addLayer(Pv, {min: 0, max: 1}, 'Pv');
+
+
+// 5. Emissivity (EM)
+// ======================================
+var EM = Pv.multiply(0.004).add(0.986).rename('EM');
+Map.addLayer(EM, {min: 0.98, max: 1}, 'Emissivity');
+
+// ======================================
+// 6. Brightness Temperature (Kelvin)
+var BT = image.select('ST_B10')
+  .multiply(0.00341802)
+  .add(149.0)
+  .rename('BT');
+Map.addLayer(BT, {min: 290, max: 320}, 'Brightness Temperature');
+
+ // 7. Land Surface Temperature (°C)
+// Equatio of the LST==== LST = BT / (1 + (0.00115 * BT / 1.438) * ln(EM)) - 273.15
+// ======================================
+var LST = BT.expression(
+  'BT / (1 + (0.00115 * BT / 1.438) * log(EM)) - 273.15',
+  {
+    'BT': BT,
+    'EM': EM
+  }
+).rename('LST');
+
+Map.addLayer(LST, {
+  min: 20,
+  max: 45,
+  palette: [
+  '040274', '040281','0502a3','0502b8','0502ce', '0502e6', '0602ff', '235cb1', '307ef3','269db1','30c8e2','32d3ef',
+  '3be285','3ff38f','86e26f','3ae237','b5e22e','d6e21f','fff705','ffd611','ffb613','ff8b13','ff6e08','ff500d','ff0000',  // hot
+  'de0101','c21301','a71001','911003']
+}, 'LST (°C)');
+
+// ======================================
+// 8. Check LST statistics (clamped)
+var lstStats = LST.reduceRegion({
+  reducer: ee.Reducer.minMax().combine({
+    reducer2: ee.Reducer.mean().combine({
+      reducer2: ee.Reducer.stdDev(),
+      sharedInputs: true
+    }),
+    sharedInputs: true
+  }),
+  geometry: ROI,
+  scale: 30,
+  maxPixels: 1e13
+});
+print('LST Statistics 2025:', lstStats);
+
+// ======================================
+// 9. Export NDVI to Drive
+Export.image.toDrive({
+  image: NDVI,
+  description: 'NDVI_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'NDVI_2025',
+  region: ROI,
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+
+// ===============================
+//10  Map Title
+// ===============================
+var title = ui.Label({
+  value: 'Land Surface Temperature (LST) – 2025',
+  style: {
+    fontSize: '20px',
+    fontWeight: 'bold',
+    textAlign: 'center',
+    stretch: 'horizontal',
+    margin: '10px 0'
+  }
+});
+
+var titlePanel = ui.Panel({
+  widgets: [title],
+  style: {
+    position: 'top-center',
+    padding: '8px',
+    backgroundColor: 'rgba(255,255,255,0.8)'
+  }
+});
+
+Map.add(titlePanel);
+
+
+// 11 LST Legend
+// ===============================
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px',
+    backgroundColor: 'rgba(255,255,255,0.8)'
+  }
+});
+
+// Legend title
+legend.add(ui.Label({
+  value: 'LST (°C)',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    margin: '0 0 6px 0'
+  }
+}));
+
+// LST palette and range (must match Map.addLayer)
+var palette = [
+'040274', '040281','0502a3','0502b8','0502ce', '0502e6', '0602ff', '235cb1', '307ef3','269db1','30c8e2','32d3ef',
+  '3be285','3ff38f','86e26f','3ae237','b5e22e','d6e21f','fff705','ffd611','ffb613','ff8b13','ff6e08','ff500d','ff0000',  // hot
+  'de0101','c21301','a71001','911003'
+];
+
+var minLST = 26;
+var maxLST = 40;
+
+// Create legend rows
+var makeRow = function(color, label) {
+  return ui.Panel({
+    widgets: [
+      ui.Label({
+        style: {
+          backgroundColor: '#' + color,
+          padding: '8px',
+          margin: '0 0 4px 0'
+        }
+      }),
+      ui.Label({
+        value: label,
+        style: {margin: '0 0 4px 6px'}
+      })
+    ],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+// Add legend entries (sampled)
+legend.add(makeRow(palette[0], minLST + ' °C'));
+legend.add(makeRow(palette[7], ''));
+legend.add(makeRow(palette[14], ''));
+legend.add(makeRow(palette[21], ''));
+legend.add(makeRow(palette[28], maxLST + ' °C'));
+
+Map.add(legend);
